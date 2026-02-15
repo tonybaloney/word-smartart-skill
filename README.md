@@ -104,7 +104,7 @@ See **[SKILL.md](SKILL.md)** for the complete skill document with:
 
 ## How It Works
 
-Uses pre-generated Word templates (in `templates/`) that contain valid SmartArt XML parts. At runtime, the library extracts the layout/style/color definitions from templates and injects a custom data model with your content. Word regenerates the visual rendering on open.
+Uses pre-generated Word templates (in `templates/`) containing valid SmartArt XML parts created by Word COM automation. At runtime, the library modifies template data models in-place (preserving undocumented presentation points that Word requires), then injects the parts directly into the `.docx` ZIP archive via post-processing. This bypasses python-docx's Part API, which produces structurally identical files that Word silently refuses to render. `SmartArt.save()` handles this automatically.
 
 ## Regenerating Templates
 
