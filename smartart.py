@@ -96,6 +96,35 @@ def _new_guid() -> str:
     return "{{{}}}".format(str(uuid.uuid4()).upper())
 
 
+def _ensure_modern_compat(doc: Document):
+    """
+    Upgrade the document's compatibility mode to Word 2013+ (val=15).
+
+    python-docx defaults to compatibilityMode=14 (Word 2010), which causes
+    Word to open in "Compatibility Mode" and not regenerate SmartArt diagrams.
+    Setting it to 15 ensures modern rendering.
+    """
+    W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    settings_part = doc.settings.element
+
+    compat = settings_part.find("{%s}compat" % W_NS)
+    if compat is None:
+        compat = etree.SubElement(settings_part, "{%s}compat" % W_NS)
+
+    # Find or create the compatibilityMode setting
+    for setting in compat.findall("{%s}compatSetting" % W_NS):
+        if setting.get("{%s}name" % W_NS) == "compatibilityMode":
+            setting.set("{%s}val" % W_NS, "15")
+            return
+
+    # Not found — add it
+    etree.SubElement(compat, "{%s}compatSetting" % W_NS, attrib={
+        "{%s}name" % W_NS: "compatibilityMode",
+        "{%s}uri" % W_NS: "http://schemas.microsoft.com/office/word",
+        "{%s}val" % W_NS: "15",
+    })
+
+
 def _next_diagram_id(doc: Document) -> int:
     """Find the next available diagram part index in the document."""
     existing = set()
@@ -181,228 +210,234 @@ def _extract_rels_from_template(template_name: str) -> dict:
 
 # ─── Data Model Modification ───────────────────────────────────────────────
 
-def _build_data_model_flat(template_data_xml: bytes, items: list[str],
-                           layout_uri: str) -> bytes:
+def _modify_template_data_flat(template_data_xml: bytes, items: list[str]) -> bytes:
     """
-    Build a new data model XML for flat diagrams (list, process, cycle, etc.)
-    based on the template's structure but with custom items.
+    Modify a template's data model XML in-place for flat diagrams.
 
-    The template's data model has a known structure with parTrans/sibTrans points.
-    We rebuild the data model with the correct number of items.
+    Instead of building from scratch, this preserves the template's presentation
+    points and connections (which are required for rendering) and only changes
+    the text content of data nodes. Nodes are added or removed to match the
+    requested item count.
     """
-    root = etree.Element(_qn("dgm", "dataModel"), nsmap={
-        "dgm": NS["dgm"],
-        "a": NS["a"],
-        "r": NS["r"],
-    })
+    root = etree.fromstring(template_data_xml)
+    pt_lst = root.find(_qn("dgm", "ptLst"))
+    cxn_lst = root.find(_qn("dgm", "cxnLst"))
 
-    pt_lst = etree.SubElement(root, _qn("dgm", "ptLst"))
-    cxn_lst = etree.SubElement(root, _qn("dgm", "cxnLst"))
+    # Find existing data nodes (type=None means data node)
+    data_nodes = []
+    for pt in pt_lst.findall(_qn("dgm", "pt")):
+        if pt.get("type") is None:
+            data_nodes.append(pt)
 
-    # Parse template to extract the doc point's prSet attributes
-    tpl_root = etree.fromstring(template_data_xml)
-    tpl_doc_pt = tpl_root.find(".//dgm:pt[@type='doc']", NS)
-    tpl_pr_set = tpl_doc_pt.find("dgm:prSet", NS) if tpl_doc_pt is not None else None
-
-    # Create doc point (root)
-    doc_guid = _new_guid()
-    doc_pt = etree.SubElement(pt_lst, _qn("dgm", "pt"), attrib={
-        "modelId": doc_guid,
-        "type": "doc",
-    })
-
-    # Copy prSet from template or create default
-    if tpl_pr_set is not None:
-        pr_set = copy.deepcopy(tpl_pr_set)
-        doc_pt.append(pr_set)
-    else:
-        etree.SubElement(doc_pt, _qn("dgm", "prSet"), attrib={
-            "loTypeId": layout_uri,
-            "loCatId": "list",
-            "qsTypeId": "urn:microsoft.com/office/officeart/2005/8/quickstyle/simple1",
-            "qsCatId": "simple",
-            "csTypeId": "urn:microsoft.com/office/officeart/2005/8/colors/accent1_2",
-            "csCatId": "accent1",
-            "phldr": "1",
-        })
-
-    etree.SubElement(doc_pt, _qn("dgm", "spPr"))
-    t_elem = etree.SubElement(doc_pt, _qn("dgm", "t"))
-    etree.SubElement(t_elem, _qn("a", "bodyPr"))
-    etree.SubElement(t_elem, _qn("a", "lstStyle"))
-    p = etree.SubElement(t_elem, _qn("a", "p"))
-    etree.SubElement(p, _qn("a", "endParaRPr"), attrib={"lang": "en-US"})
-
-    # Create data points with parTrans and sibTrans
+    # Update text of existing nodes
     for i, item_text in enumerate(items):
-        item_guid = _new_guid()
-        par_trans_guid = _new_guid()
-        sib_trans_guid = _new_guid()
-        cxn_guid = _new_guid()
+        if i < len(data_nodes):
+            _set_node_text(data_nodes[i], item_text)
 
-        # Data point
-        pt = etree.SubElement(pt_lst, _qn("dgm", "pt"), attrib={"modelId": item_guid})
-        etree.SubElement(pt, _qn("dgm", "prSet"), attrib={"phldrT": "[Text]"})
-        etree.SubElement(pt, _qn("dgm", "spPr"))
-        t_elem = etree.SubElement(pt, _qn("dgm", "t"))
-        etree.SubElement(t_elem, _qn("a", "bodyPr"))
-        etree.SubElement(t_elem, _qn("a", "lstStyle"))
-        p = etree.SubElement(t_elem, _qn("a", "p"))
-        r = etree.SubElement(p, _qn("a", "r"))
-        etree.SubElement(r, _qn("a", "rPr"), attrib={"lang": "en-US"})
-        t = etree.SubElement(r, _qn("a", "t"))
-        t.text = item_text
+    # If we need fewer nodes than the template has, remove extras
+    if len(items) < len(data_nodes):
+        _remove_excess_nodes(root, pt_lst, cxn_lst, data_nodes, len(items))
 
-        # Parent transition point
-        par_pt = etree.SubElement(pt_lst, _qn("dgm", "pt"), attrib={
-            "modelId": par_trans_guid,
-            "type": "parTrans",
-            "cxnId": cxn_guid,
-        })
-        etree.SubElement(par_pt, _qn("dgm", "prSet"))
-        etree.SubElement(par_pt, _qn("dgm", "spPr"))
-        par_t = etree.SubElement(par_pt, _qn("dgm", "t"))
-        etree.SubElement(par_t, _qn("a", "bodyPr"))
-        etree.SubElement(par_t, _qn("a", "lstStyle"))
-        par_p = etree.SubElement(par_t, _qn("a", "p"))
-        etree.SubElement(par_p, _qn("a", "endParaRPr"), attrib={"lang": "en-US"})
-
-        # Sibling transition point
-        sib_pt = etree.SubElement(pt_lst, _qn("dgm", "pt"), attrib={
-            "modelId": sib_trans_guid,
-            "type": "sibTrans",
-            "cxnId": cxn_guid,
-        })
-        etree.SubElement(sib_pt, _qn("dgm", "prSet"))
-        etree.SubElement(sib_pt, _qn("dgm", "spPr"))
-        sib_t = etree.SubElement(sib_pt, _qn("dgm", "t"))
-        etree.SubElement(sib_t, _qn("a", "bodyPr"))
-        etree.SubElement(sib_t, _qn("a", "lstStyle"))
-        sib_p = etree.SubElement(sib_t, _qn("a", "p"))
-        etree.SubElement(sib_p, _qn("a", "endParaRPr"), attrib={"lang": "en-US"})
-
-        # Connection: doc -> item (parOf)
-        etree.SubElement(cxn_lst, _qn("dgm", "cxn"), attrib={
-            "modelId": cxn_guid,
-            "type": "parOf",
-            "srcId": doc_guid,
-            "destId": item_guid,
-            "srcOrd": str(i),
-            "destOrd": "0",
-            "parTransId": par_trans_guid,
-            "sibTransId": sib_trans_guid,
-        })
-
-    # Background element (required by Word)
-    bg = etree.SubElement(root, _qn("dgm", "bg"))
-    whole = etree.SubElement(root, _qn("dgm", "whole"))
+    # If we need more nodes than the template has, duplicate the last one
+    if len(items) > len(data_nodes):
+        _add_extra_nodes(root, pt_lst, cxn_lst, data_nodes, items[len(data_nodes):])
 
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
 
 
-def _build_data_model_hierarchy(template_data_xml: bytes, hierarchy: dict,
-                                layout_uri: str) -> bytes:
-    """
-    Build a data model for hierarchy diagrams from a nested dict.
-
-    hierarchy format: {"Root": {"Child1": {"GC1": {}, "GC2": {}}, "Child2": {}}}
-    """
-    root = etree.Element(_qn("dgm", "dataModel"), nsmap={
-        "dgm": NS["dgm"],
-        "a": NS["a"],
-        "r": NS["r"],
-    })
-
-    pt_lst = etree.SubElement(root, _qn("dgm", "ptLst"))
-    cxn_lst = etree.SubElement(root, _qn("dgm", "cxnLst"))
-
-    # Parse template doc point
-    tpl_root = etree.fromstring(template_data_xml)
-    tpl_doc_pt = tpl_root.find(".//dgm:pt[@type='doc']", NS)
-    tpl_pr_set = tpl_doc_pt.find("dgm:prSet", NS) if tpl_doc_pt is not None else None
-
-    doc_guid = _new_guid()
-    doc_pt = etree.SubElement(pt_lst, _qn("dgm", "pt"), attrib={
-        "modelId": doc_guid,
-        "type": "doc",
-    })
-    if tpl_pr_set is not None:
-        doc_pt.append(copy.deepcopy(tpl_pr_set))
+def _set_node_text(pt, text: str):
+    """Set the text content of a diagram data point."""
+    A_NS = NS["a"]
+    t_elem = pt.find(".//{%s}t" % A_NS)
+    if t_elem is not None:
+        t_elem.text = text
     else:
-        etree.SubElement(doc_pt, _qn("dgm", "prSet"), attrib={
-            "loTypeId": layout_uri, "loCatId": "hierarchy",
-            "qsTypeId": "urn:microsoft.com/office/officeart/2005/8/quickstyle/simple1",
-            "qsCatId": "simple",
-            "csTypeId": "urn:microsoft.com/office/officeart/2005/8/colors/accent1_2",
-            "csCatId": "accent1", "phldr": "1",
+        # Build text structure if missing
+        dgm_t = pt.find(_qn("dgm", "t"))
+        if dgm_t is None:
+            dgm_t = etree.SubElement(pt, _qn("dgm", "t"))
+            etree.SubElement(dgm_t, _qn("a", "bodyPr"))
+            etree.SubElement(dgm_t, _qn("a", "lstStyle"))
+        # Remove existing paragraphs
+        for p in dgm_t.findall(_qn("a", "p")):
+            dgm_t.remove(p)
+        p = etree.SubElement(dgm_t, _qn("a", "p"))
+        r = etree.SubElement(p, _qn("a", "r"))
+        etree.SubElement(r, _qn("a", "rPr"), attrib={"lang": "en-US"})
+        t = etree.SubElement(r, _qn("a", "t"))
+        t.text = text
+
+
+def _remove_excess_nodes(root, pt_lst, cxn_lst, data_nodes, keep_count: int):
+    """Remove data nodes (and their transitions/connections/pres points) beyond keep_count."""
+    to_remove_ids = set()
+    for node in data_nodes[keep_count:]:
+        to_remove_ids.add(node.get("modelId"))
+
+    # Find associated parTrans and sibTrans IDs via connections
+    trans_ids = set()
+    cxns_to_remove = []
+    for cxn in cxn_lst.findall(_qn("dgm", "cxn")):
+        dest_id = cxn.get("destId", "")
+        src_id = cxn.get("srcId", "")
+        if dest_id in to_remove_ids or src_id in to_remove_ids:
+            cxns_to_remove.append(cxn)
+            par_trans = cxn.get("parTransId", "")
+            sib_trans = cxn.get("sibTransId", "")
+            if par_trans:
+                trans_ids.add(par_trans)
+            if sib_trans:
+                trans_ids.add(sib_trans)
+
+    all_remove_ids = to_remove_ids | trans_ids
+
+    # Also find presOf connections referencing removed nodes
+    pres_ids_to_remove = set()
+    for cxn in cxn_lst.findall(_qn("dgm", "cxn")):
+        if cxn.get("type") == "presOf" and cxn.get("srcId", "") in all_remove_ids:
+            pres_ids_to_remove.add(cxn.get("destId", ""))
+            cxns_to_remove.append(cxn)
+        elif cxn.get("type") == "presParOf" and cxn.get("destId", "") in pres_ids_to_remove:
+            cxns_to_remove.append(cxn)
+
+    all_remove_ids |= pres_ids_to_remove
+
+    # Remove points
+    for pt in list(pt_lst.findall(_qn("dgm", "pt"))):
+        if pt.get("modelId") in all_remove_ids:
+            pt_lst.remove(pt)
+
+    # Remove connections
+    for cxn in cxns_to_remove:
+        try:
+            cxn_lst.remove(cxn)
+        except ValueError:
+            pass
+
+
+def _add_extra_nodes(root, pt_lst, cxn_lst, existing_data_nodes, extra_items: list[str]):
+    """Add additional data nodes by cloning the last existing node's structure."""
+    if not existing_data_nodes:
+        return
+
+    last_node = existing_data_nodes[-1]
+    last_id = last_node.get("modelId")
+
+    # Find the doc point (parent)
+    doc_pt = None
+    for pt in pt_lst.findall(_qn("dgm", "pt")):
+        if pt.get("type") == "doc":
+            doc_pt = pt
+            break
+    doc_id = doc_pt.get("modelId") if doc_pt is not None else ""
+
+    # Find the parOf connection for the last node to get srcOrd
+    last_ord = 0
+    for cxn in cxn_lst.findall(_qn("dgm", "cxn")):
+        if cxn.get("type") == "parOf" and cxn.get("destId") == last_id:
+            last_ord = int(cxn.get("srcOrd", "0"))
+            break
+
+    for i, text in enumerate(extra_items):
+        new_id = _new_guid()
+        par_trans_id = _new_guid()
+        sib_trans_id = _new_guid()
+        cxn_id = _new_guid()
+        ord_val = str(last_ord + i + 1)
+
+        # Data point
+        pt = copy.deepcopy(last_node)
+        pt.set("modelId", new_id)
+        _set_node_text(pt, text)
+        pt_lst.append(pt)
+
+        # parTrans point
+        par_pt = etree.SubElement(pt_lst, _qn("dgm", "pt"), attrib={
+            "modelId": par_trans_id, "type": "parTrans", "cxnId": cxn_id,
         })
-    etree.SubElement(doc_pt, _qn("dgm", "spPr"))
-    t_elem = etree.SubElement(doc_pt, _qn("dgm", "t"))
-    etree.SubElement(t_elem, _qn("a", "bodyPr"))
-    etree.SubElement(t_elem, _qn("a", "lstStyle"))
-    p = etree.SubElement(t_elem, _qn("a", "p"))
-    etree.SubElement(p, _qn("a", "endParaRPr"), attrib={"lang": "en-US"})
+        etree.SubElement(par_pt, _qn("dgm", "prSet"))
+        etree.SubElement(par_pt, _qn("dgm", "spPr"))
 
-    ord_counter = [0]
+        # sibTrans point
+        sib_pt = etree.SubElement(pt_lst, _qn("dgm", "pt"), attrib={
+            "modelId": sib_trans_id, "type": "sibTrans", "cxnId": cxn_id,
+        })
+        etree.SubElement(sib_pt, _qn("dgm", "prSet"))
+        etree.SubElement(sib_pt, _qn("dgm", "spPr"))
 
-    def add_hierarchy_nodes(parent_guid, children_dict, depth=0):
-        for i, (label, grandchildren) in enumerate(children_dict.items()):
-            item_guid = _new_guid()
-            par_trans_guid = _new_guid()
-            sib_trans_guid = _new_guid()
-            cxn_guid = _new_guid()
+        # parOf connection
+        etree.SubElement(cxn_lst, _qn("dgm", "cxn"), attrib={
+            "modelId": cxn_id, "type": "parOf",
+            "srcId": doc_id, "destId": new_id,
+            "srcOrd": ord_val, "destOrd": "0",
+            "parTransId": par_trans_id, "sibTransId": sib_trans_id,
+        })
 
-            # Data point
-            pt = etree.SubElement(pt_lst, _qn("dgm", "pt"), attrib={"modelId": item_guid})
-            etree.SubElement(pt, _qn("dgm", "prSet"), attrib={"phldrT": "[Text]"})
-            etree.SubElement(pt, _qn("dgm", "spPr"))
-            t_elem = etree.SubElement(pt, _qn("dgm", "t"))
-            etree.SubElement(t_elem, _qn("a", "bodyPr"))
-            etree.SubElement(t_elem, _qn("a", "lstStyle"))
-            p = etree.SubElement(t_elem, _qn("a", "p"))
-            r = etree.SubElement(p, _qn("a", "r"))
-            etree.SubElement(r, _qn("a", "rPr"), attrib={"lang": "en-US"})
-            t = etree.SubElement(r, _qn("a", "t"))
-            t.text = label
 
-            # Transition points
-            par_pt = etree.SubElement(pt_lst, _qn("dgm", "pt"), attrib={
-                "modelId": par_trans_guid, "type": "parTrans", "cxnId": cxn_guid,
-            })
-            etree.SubElement(par_pt, _qn("dgm", "prSet"))
-            etree.SubElement(par_pt, _qn("dgm", "spPr"))
-            par_t = etree.SubElement(par_pt, _qn("dgm", "t"))
-            etree.SubElement(par_t, _qn("a", "bodyPr"))
-            etree.SubElement(par_t, _qn("a", "lstStyle"))
-            par_p = etree.SubElement(par_t, _qn("a", "p"))
-            etree.SubElement(par_p, _qn("a", "endParaRPr"), attrib={"lang": "en-US"})
+def _modify_template_data_hierarchy(template_data_xml: bytes, hierarchy: dict) -> bytes:
+    """
+    Modify a hierarchy template's data model with custom hierarchy data.
 
-            sib_pt = etree.SubElement(pt_lst, _qn("dgm", "pt"), attrib={
-                "modelId": sib_trans_guid, "type": "sibTrans", "cxnId": cxn_guid,
-            })
-            etree.SubElement(sib_pt, _qn("dgm", "prSet"))
-            etree.SubElement(sib_pt, _qn("dgm", "spPr"))
-            sib_t = etree.SubElement(sib_pt, _qn("dgm", "t"))
-            etree.SubElement(sib_t, _qn("a", "bodyPr"))
-            etree.SubElement(sib_t, _qn("a", "lstStyle"))
-            sib_p = etree.SubElement(sib_t, _qn("a", "p"))
-            etree.SubElement(sib_p, _qn("a", "endParaRPr"), attrib={"lang": "en-US"})
+    Since hierarchy structures vary significantly, we replace data node text
+    in a depth-first traversal matching the template's tree structure.
+    For now, this modifies existing nodes' text to match the hierarchy.
+    """
+    root = etree.fromstring(template_data_xml)
+    pt_lst = root.find(_qn("dgm", "ptLst"))
+    cxn_lst = root.find(_qn("dgm", "cxnLst"))
 
-            # Connection
-            etree.SubElement(cxn_lst, _qn("dgm", "cxn"), attrib={
-                "modelId": cxn_guid, "type": "parOf",
-                "srcId": parent_guid, "destId": item_guid,
-                "srcOrd": str(i), "destOrd": "0",
-                "parTransId": par_trans_guid, "sibTransId": sib_trans_guid,
-            })
+    # Build a tree structure from the template connections
+    doc_pt = None
+    nodes_by_id = {}
+    for pt in pt_lst.findall(_qn("dgm", "pt")):
+        mid = pt.get("modelId")
+        ptype = pt.get("type")
+        if ptype == "doc":
+            doc_pt = pt
+        elif ptype is None:
+            nodes_by_id[mid] = pt
 
-            if grandchildren:
-                add_hierarchy_nodes(item_guid, grandchildren, depth + 1)
+    # Build parent->children map from parOf connections
+    children_map = {}  # parent_id -> [(srcOrd, child_id)]
+    for cxn in cxn_lst.findall(_qn("dgm", "cxn")):
+        if cxn.get("type") == "parOf":
+            src = cxn.get("srcId")
+            dst = cxn.get("destId")
+            if dst in nodes_by_id:
+                children_map.setdefault(src, []).append(
+                    (int(cxn.get("srcOrd", "0")), dst)
+                )
 
-    add_hierarchy_nodes(doc_guid, hierarchy)
+    # Sort children by srcOrd
+    for k in children_map:
+        children_map[k].sort()
 
-    etree.SubElement(root, _qn("dgm", "bg"))
-    etree.SubElement(root, _qn("dgm", "whole"))
+    # Flatten hierarchy to list for simple text replacement
+    def flatten_hierarchy(h):
+        result = []
+        for label, children_dict in h.items():
+            result.append(label)
+            if children_dict:
+                result.extend(flatten_hierarchy(children_dict))
+        return result
+
+    flat_labels = flatten_hierarchy(hierarchy)
+
+    # Walk the template tree and assign text
+    def walk_and_assign(parent_id, labels_iter):
+        children = children_map.get(parent_id, [])
+        for _, child_id in children:
+            if child_id in nodes_by_id:
+                try:
+                    text = next(labels_iter)
+                    _set_node_text(nodes_by_id[child_id], text)
+                except StopIteration:
+                    break
+                walk_and_assign(child_id, labels_iter)
+
+    doc_id = doc_pt.get("modelId") if doc_pt is not None else ""
+    labels_iter = iter(flat_labels)
+    walk_and_assign(doc_id, labels_iter)
 
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
 
@@ -410,7 +445,7 @@ def _build_data_model_hierarchy(template_data_xml: bytes, hierarchy: dict,
 # ─── Minimal Drawing Part ──────────────────────────────────────────────────
 
 def _build_empty_drawing() -> bytes:
-    """Build a minimal drawing part. Word regenerates this on open."""
+    """Build a minimal drawing part. Word regenerates this on first render."""
     root = etree.Element(_qn("dsp", "drawing"), nsmap={
         "dsp": NS["dsp"],
     })
@@ -437,6 +472,10 @@ def _inject_smartart(doc: Document, template_name: str, data_xml: bytes,
         height_emu: Height in EMUs
     """
     idx = _next_diagram_id(doc)
+
+    # Ensure document is in modern format so Word regenerates SmartArt
+    _ensure_modern_compat(doc)
+
     parts = _extract_template_parts(template_name)
     rel_types = _extract_rels_from_template(template_name)
 
@@ -447,8 +486,9 @@ def _inject_smartart(doc: Document, template_name: str, data_xml: bytes,
     colors_pn = PackURI("/word/diagrams/colors{}.xml".format(idx))
     drawing_pn = PackURI("/word/diagrams/drawing{}.xml".format(idx))
 
-    # Use custom data, template layout/style/colors, and empty drawing
-    # (Word regenerates the drawing from data + layout on open)
+    # Use custom data, template layout/style/colors, and empty drawing.
+    # The drawing part must be empty so Word regenerates it from the data model
+    # instead of using a stale cached rendering from the template.
     data_part = Part(data_pn, CT_DGM_DATA, data_xml, doc.part.package)
     layout_part = Part(layout_pn, CT_DGM_LAYOUT, parts['layout'], doc.part.package)
     style_part = Part(style_pn, CT_DGM_STYLE, parts['style'], doc.part.package)
@@ -499,12 +539,11 @@ def _add_smartart(doc: Document, template_name: str, items: list[str],
         doc.add_heading(title, level=2)
 
     parts = _extract_template_parts(template_name)
-    layout_uri = LAYOUT_URIS.get(template_name, "")
 
     if hierarchy is not None:
-        data_xml = _build_data_model_hierarchy(parts['data'], hierarchy, layout_uri)
+        data_xml = _modify_template_data_hierarchy(parts['data'], hierarchy)
     else:
-        data_xml = _build_data_model_flat(parts['data'], items, layout_uri)
+        data_xml = _modify_template_data_flat(parts['data'], items)
 
     _inject_smartart(doc, template_name, data_xml, width_emu, height_emu)
 
@@ -688,3 +727,45 @@ class SmartArt:
         all_items = [center] + items
         _add_smartart(doc, "radial", all_items, title=title,
                       width_emu=width_emu, height_emu=height_emu)
+
+    @staticmethod
+    def finalize(path: str):
+        """
+        Post-process a saved .docx file to regenerate SmartArt rendering.
+
+        Call this after doc.save() to ensure all SmartArt diagrams render
+        correctly on first open. Requires Microsoft Word to be installed.
+
+        Without this step, SmartArt diagrams are embedded as data but may
+        appear collapsed until the user clicks on them in Word.
+
+        Args:
+            path: Path to the saved .docx file
+
+        Example:
+            doc.save("output.docx")
+            SmartArt.finalize("output.docx")
+        """
+        try:
+            import win32com.client
+        except ImportError:
+            import warnings
+            warnings.warn(
+                "pywin32 not installed. SmartArt diagrams may appear collapsed "
+                "until clicked in Word. Install pywin32 and call SmartArt.finalize() "
+                "to pre-render diagrams: pip install pywin32"
+            )
+            return
+
+        import time
+        abs_path = os.path.abspath(path)
+        word = win32com.client.DispatchEx('Word.Application')
+        time.sleep(2)
+        word.Visible = False
+        try:
+            doc = word.Documents.Open(abs_path)
+            # Opening and saving forces Word to regenerate all SmartArt drawings
+            doc.Save()
+            doc.Close(False)
+        finally:
+            word.Quit()
