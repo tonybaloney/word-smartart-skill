@@ -502,7 +502,14 @@ def _add_diagram_placeholder(doc: Document, diagram_idx: int,
     )
 
     para_element = etree.fromstring(para_xml.encode("utf-8"))
-    doc.element.body.append(para_element)
+    # Insert before sectPr to keep diagram inline with surrounding content.
+    # body.append() would place it after sectPr, breaking document flow.
+    body = doc.element.body
+    sect_pr = body.find(_qn("w", "sectPr"))
+    if sect_pr is not None:
+        sect_pr.addprevious(para_element)
+    else:
+        body.append(para_element)
 
 
 def _inject_smartart(doc: Document, template_name: str, data_xml: bytes,
