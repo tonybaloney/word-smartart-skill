@@ -48,7 +48,7 @@ def generate_basic_list():
     ])
 
     path = os.path.join(OUTPUT_DIR, "test_basic_list.docx")
-    doc.save(path)
+    SmartArt.save(doc, path)
     print(f"  Created: {path}")
     return path
 
@@ -81,7 +81,7 @@ def generate_basic_process():
     ])
 
     path = os.path.join(OUTPUT_DIR, "test_basic_process.docx")
-    doc.save(path)
+    SmartArt.save(doc, path)
     print(f"  Created: {path}")
     return path
 
@@ -135,7 +135,7 @@ def generate_hierarchy():
     })
 
     path = os.path.join(OUTPUT_DIR, "test_hierarchy.docx")
-    doc.save(path)
+    SmartArt.save(doc, path)
     print(f"  Created: {path}")
     return path
 
@@ -170,7 +170,7 @@ def generate_cycle():
     ])
 
     path = os.path.join(OUTPUT_DIR, "test_cycle.docx")
-    doc.save(path)
+    SmartArt.save(doc, path)
     print(f"  Created: {path}")
     return path
 
@@ -201,7 +201,7 @@ def generate_pyramid():
     ])
 
     path = os.path.join(OUTPUT_DIR, "test_pyramid.docx")
-    doc.save(path)
+    SmartArt.save(doc, path)
     print(f"  Created: {path}")
     return path
 
@@ -234,7 +234,7 @@ def generate_radial():
     ])
 
     path = os.path.join(OUTPUT_DIR, "test_radial.docx")
-    doc.save(path)
+    SmartArt.save(doc, path)
     print(f"  Created: {path}")
     return path
 
@@ -316,7 +316,7 @@ def generate_combined():
     ])
 
     path = os.path.join(OUTPUT_DIR, "test_combined_all_types.docx")
-    doc.save(path)
+    SmartArt.save(doc, path)
     print(f"  Created: {path}")
     return path
 

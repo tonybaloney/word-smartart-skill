@@ -154,23 +154,57 @@ def build_document():
         "Fix compatibility mode \u2013 FAILED",
         "Copy template drawing XML \u2013 FAILED",
         "COM finalize post-process \u2013 FAILED",
-        "Modify template data in-place \u2013 SUCCESS",
+        "Modify template data in-place \u2013 FAILED (rendered collapsed)",
+        "python-docx Part API injection \u2013 FAILED (identical ZIP, won\u2019t render)",
+        "Direct ZIP-level injection \u2013 SUCCESS",
     ])
 
-    # ── Section 7: The Solution ──
-    doc.add_heading("The Solution: Template-Based Generation", level=1)
+    # ── Section 7: The python-docx Part API Discovery ──
+    doc.add_heading("The Most Baffling Finding: python-docx Part API", level=1)
     add_body(doc,
-        "After seven failed approaches, we arrived at the only reliable method: use Word COM "
-        "automation as a one-time step to create template documents, then modify the template\u2019s "
-        "data model XML in-place at generation time, preserving the presentation points."
+        "Perhaps the most surprising finding was that python-docx\u2019s Part API and relate_to() "
+        "correctly create all relationships, content types, and part entries. The resulting ZIP "
+        "structure is byte-for-byte structurally identical to a working Word-generated file. "
+        "Yet Word renders SmartArt as collapsed zero-height rectangles when parts are added "
+        "through python-docx\u2019s API."
+    )
+    add_body(doc,
+        "When the exact same XML parts are injected directly into the ZIP using Python\u2019s "
+        "zipfile module (bypassing python-docx entirely for the diagram parts), Word renders them "
+        "perfectly. This suggests python-docx does something subtly wrong during serialization\u2014"
+        "possibly related to encoding, byte-order marks, or ZIP compression metadata\u2014that "
+        "Word\u2019s SmartArt renderer is sensitive to but its general document parser is not."
+    )
+
+    SmartArt.add_basic_process(doc, "The Identical ZIP Mystery", [
+        "Add parts via python-docx Part API",
+        "Resulting ZIP has correct structure",
+        "Content types match exactly",
+        "Relationships are identical",
+        "Word STILL won\u2019t render SmartArt",
+    ])
+
+    add_body(doc,
+        "This means there is something fragile in Word\u2019s SmartArt parser that goes beyond "
+        "XML correctness and ZIP structure. The document parser happily accepts the file, but "
+        "the SmartArt renderer silently refuses to process parts that are technically valid."
+    )
+
+    # ── Section 8: The Solution ──
+    doc.add_heading("The Solution: ZIP-Level Post-Processing", level=1)
+    add_body(doc,
+        "After nine failed approaches, we arrived at the only reliable method: a two-phase approach. "
+        "First, use python-docx to create the document with placeholder references. Second, "
+        "post-process the saved .docx ZIP directly to inject SmartArt XML parts, bypassing "
+        "python-docx\u2019s serialization entirely for the diagram components."
     )
 
     SmartArt.add_basic_process(doc, "How It Works", [
         "One-time: Generate templates via Word COM",
-        "Extract 5 XML parts from template",
-        "Modify data model text in-place",
-        "Preserve presentation points",
-        "Inject into target .docx",
+        "Add placeholder rIds during doc creation",
+        "Save document with python-docx",
+        "Rewrite ZIP: inject diagram parts directly",
+        "Replace placeholder rIds with real ones",
     ])
 
     # ── Section 8: What Would Help ──
@@ -230,7 +264,7 @@ def build_document():
 if __name__ == "__main__":
     doc = build_document()
     out_path = os.path.join(os.path.dirname(__file__), "_feedback_for_word_team.docx")
-    doc.save(out_path)
+    SmartArt.save(doc, out_path)
     print(f"Saved: {out_path}")
 
     # Verify diagram parts exist

@@ -277,10 +277,7 @@ continuously work to make reality match your declaration.
 
     # Save
     output_path = "tests/sample_kubernetes_explainer.docx"
-    doc.save(output_path)
-
-    # Finalize: open in Word to regenerate SmartArt rendering
-    SmartArt.finalize(output_path)
+    SmartArt.save(doc, output_path)
 
     print("Generated: {}".format(output_path))
     return output_path

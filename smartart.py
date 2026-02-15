@@ -33,18 +33,17 @@ Usage:
         "Step 4: Test",
     ])
 
-    doc.save("output.docx")
+    SmartArt.save(doc, "output.docx")
 """
 
 import os
 import copy
 import uuid
 import zipfile
+import shutil
 from typing import Optional
 from lxml import etree
 from docx import Document
-from docx.opc.part import Part
-from docx.opc.packuri import PackURI
 
 # ─── Paths ──────────────────────────────────────────────────────────────────
 
@@ -442,67 +441,44 @@ def _modify_template_data_hierarchy(template_data_xml: bytes, hierarchy: dict) -
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
 
 
-# ─── Minimal Drawing Part ──────────────────────────────────────────────────
+# ─── Part Injection (ZIP-level) ─────────────────────────────────────────────
+#
+# python-docx's Part API does not correctly package SmartArt parts into the
+# .docx ZIP in a way that Word can render. Instead, we use a two-phase approach:
+#   Phase 1: Add placeholder paragraphs with marker rIds during document creation
+#   Phase 2: Post-process the saved .docx ZIP to inject diagram parts directly
+#
+# This is the ONLY reliable method for programmatic SmartArt creation.
 
-def _build_empty_drawing() -> bytes:
-    """Build a minimal drawing part. Word regenerates this on first render."""
-    root = etree.Element(_qn("dsp", "drawing"), nsmap={
-        "dsp": NS["dsp"],
-    })
-    sp_tree = etree.SubElement(root, _qn("dsp", "spTree"))
-    nvGrpSpPr = etree.SubElement(sp_tree, _qn("dsp", "nvGrpSpPr"))
-    etree.SubElement(nvGrpSpPr, _qn("dsp", "cNvPr"), attrib={"id": "0", "name": ""})
-    etree.SubElement(nvGrpSpPr, _qn("dsp", "cNvGrpSpPr"))
-    etree.SubElement(sp_tree, _qn("dsp", "grpSpPr"))
-    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+# Relationship type URIs (extracted from Word-generated templates)
+_REL_TYPES = {
+    'data': "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData",
+    'layout': "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramLayout",
+    'style': "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramQuickStyle",
+    'colors': "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramColors",
+    'drawing': "http://schemas.microsoft.com/office/2007/relationships/diagramDrawing",
+}
+
+CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+RELS_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 
 
-# ─── Part Injection ─────────────────────────────────────────────────────────
+def _get_pending_diagrams(doc: Document) -> list:
+    """Get or create the list of pending diagrams attached to a document."""
+    if not hasattr(doc, '_smartart_pending'):
+        doc._smartart_pending = []
+    return doc._smartart_pending
 
-def _inject_smartart(doc: Document, template_name: str, data_xml: bytes,
-                     width_emu: int = 5486400, height_emu: int = 3200400):
-    """
-    Inject SmartArt into a document by copying template parts and using custom data.
 
-    Args:
-        doc: python-docx Document
-        template_name: Name of template (e.g. 'basic_list')
-        data_xml: Custom diagram data XML
-        width_emu: Width in EMUs
-        height_emu: Height in EMUs
-    """
-    idx = _next_diagram_id(doc)
+def _add_diagram_placeholder(doc: Document, diagram_idx: int,
+                             width_emu: int, height_emu: int):
+    """Add a paragraph with placeholder rIds that will be replaced at save time."""
+    # Use placeholder rIds that will be replaced during ZIP post-processing
+    dm_placeholder = "__SMARTART_{}_DM__".format(diagram_idx)
+    lo_placeholder = "__SMARTART_{}_LO__".format(diagram_idx)
+    qs_placeholder = "__SMARTART_{}_QS__".format(diagram_idx)
+    cs_placeholder = "__SMARTART_{}_CS__".format(diagram_idx)
 
-    # Ensure document is in modern format so Word regenerates SmartArt
-    _ensure_modern_compat(doc)
-
-    parts = _extract_template_parts(template_name)
-    rel_types = _extract_rels_from_template(template_name)
-
-    # Part names for this diagram
-    data_pn = PackURI("/word/diagrams/data{}.xml".format(idx))
-    layout_pn = PackURI("/word/diagrams/layout{}.xml".format(idx))
-    style_pn = PackURI("/word/diagrams/quickStyle{}.xml".format(idx))
-    colors_pn = PackURI("/word/diagrams/colors{}.xml".format(idx))
-    drawing_pn = PackURI("/word/diagrams/drawing{}.xml".format(idx))
-
-    # Use custom data, template layout/style/colors, and empty drawing.
-    # The drawing part must be empty so Word regenerates it from the data model
-    # instead of using a stale cached rendering from the template.
-    data_part = Part(data_pn, CT_DGM_DATA, data_xml, doc.part.package)
-    layout_part = Part(layout_pn, CT_DGM_LAYOUT, parts['layout'], doc.part.package)
-    style_part = Part(style_pn, CT_DGM_STYLE, parts['style'], doc.part.package)
-    colors_part = Part(colors_pn, CT_DGM_COLORS, parts['colors'], doc.part.package)
-    drawing_part = Part(drawing_pn, CT_DGM_DRAWING, _build_empty_drawing(), doc.part.package)
-
-    # Add relationships using the exact types from the template
-    r_data = doc.part.relate_to(data_part, rel_types.get('data', RT_DGM_DATA))
-    r_layout = doc.part.relate_to(layout_part, rel_types.get('layout', RT_DGM_LAYOUT))
-    r_style = doc.part.relate_to(style_part, rel_types.get('style', RT_DGM_STYLE))
-    r_colors = doc.part.relate_to(colors_part, rel_types.get('colors', RT_DGM_COLORS))
-    r_drawing = doc.part.relate_to(drawing_part, rel_types.get('drawing', RT_DGM_DRAWING))
-
-    # Build inline drawing paragraph
     para_xml = (
         '<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
         ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
@@ -521,12 +497,141 @@ def _inject_smartart(doc: Document, template_name: str, data_xml: bytes,
         '</wp:inline>'
         '</w:drawing></w:r></w:p>'
     ).format(
-        w=width_emu, h=height_emu, did=idx + 100, idx=idx,
-        dm=r_data, lo=r_layout, qs=r_style, cs=r_colors,
+        w=width_emu, h=height_emu, did=diagram_idx + 100, idx=diagram_idx,
+        dm=dm_placeholder, lo=lo_placeholder, qs=qs_placeholder, cs=cs_placeholder,
     )
 
     para_element = etree.fromstring(para_xml.encode("utf-8"))
     doc.element.body.append(para_element)
+
+
+def _inject_smartart(doc: Document, template_name: str, data_xml: bytes,
+                     width_emu: int = 5486400, height_emu: int = 3200400):
+    """
+    Register a SmartArt diagram for injection at save time.
+
+    This adds a placeholder paragraph to the document and stores the diagram
+    spec. The actual XML parts are injected by SmartArt.save().
+    """
+    _ensure_modern_compat(doc)
+
+    pending = _get_pending_diagrams(doc)
+    diagram_idx = len(pending) + 1
+
+    parts = _extract_template_parts(template_name)
+
+    pending.append({
+        'idx': diagram_idx,
+        'data_xml': data_xml,
+        'layout_xml': parts['layout'],
+        'style_xml': parts['style'],
+        'colors_xml': parts['colors'],
+        'drawing_xml': parts['drawing'],
+    })
+
+    _add_diagram_placeholder(doc, diagram_idx, width_emu, height_emu)
+
+
+def _postprocess_docx(path: str, diagrams: list):
+    """
+    Post-process a saved .docx to inject SmartArt XML parts at the ZIP level.
+
+    This is necessary because python-docx's Part API does not package diagram
+    parts in a way that Word can render. Direct ZIP manipulation works.
+    """
+    import shutil
+    import tempfile
+
+    tmp_path = path + ".tmp"
+    shutil.copy2(path, tmp_path)
+
+    # First pass: find max existing rId
+    with zipfile.ZipFile(tmp_path, 'r') as zin:
+        rels_xml = zin.read('word/_rels/document.xml.rels')
+        rels_root = etree.fromstring(rels_xml)
+        max_id = 0
+        for rel in rels_root:
+            rid = rel.get('Id', '')
+            if rid.startswith('rId'):
+                try:
+                    max_id = max(max_id, int(rid[3:]))
+                except ValueError:
+                    pass
+
+    # Build rId assignments for all diagrams
+    rid_map = {}  # placeholder -> real rId
+    diagram_rels = []  # (rId, type, target) tuples
+    rid_counter = max_id + 1
+
+    for dgm in diagrams:
+        idx = dgm['idx']
+        rids = {}
+        for key, rel_type, filename in [
+            ('dm', 'data', 'data{}.xml'.format(idx)),
+            ('lo', 'layout', 'layout{}.xml'.format(idx)),
+            ('qs', 'style', 'quickStyle{}.xml'.format(idx)),
+            ('cs', 'colors', 'colors{}.xml'.format(idx)),
+            ('dr', 'drawing', 'drawing{}.xml'.format(idx)),
+        ]:
+            rid = 'rId{}'.format(rid_counter)
+            rid_counter += 1
+            rids[key] = rid
+            diagram_rels.append((rid, _REL_TYPES[rel_type], 'diagrams/' + filename))
+
+        rid_map['__SMARTART_{}_DM__'.format(idx)] = rids['dm']
+        rid_map['__SMARTART_{}_LO__'.format(idx)] = rids['lo']
+        rid_map['__SMARTART_{}_QS__'.format(idx)] = rids['qs']
+        rid_map['__SMARTART_{}_CS__'.format(idx)] = rids['cs']
+
+    # Second pass: rewrite ZIP with modifications
+    with zipfile.ZipFile(tmp_path, 'r') as zin:
+        with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.namelist():
+                raw = zin.read(item)
+
+                if item == '[Content_Types].xml':
+                    root = etree.fromstring(raw)
+                    for dgm in diagrams:
+                        idx = dgm['idx']
+                        for pn, ct in [
+                            ('/word/diagrams/data{}.xml'.format(idx), CT_DGM_DATA),
+                            ('/word/diagrams/layout{}.xml'.format(idx), CT_DGM_LAYOUT),
+                            ('/word/diagrams/quickStyle{}.xml'.format(idx), CT_DGM_STYLE),
+                            ('/word/diagrams/colors{}.xml'.format(idx), CT_DGM_COLORS),
+                            ('/word/diagrams/drawing{}.xml'.format(idx), CT_DGM_DRAWING),
+                        ]:
+                            etree.SubElement(root, '{%s}Override' % CT_NS, attrib={
+                                'PartName': pn, 'ContentType': ct,
+                            })
+                    raw = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+                elif item == 'word/_rels/document.xml.rels':
+                    root = etree.fromstring(raw)
+                    for rid, rtype, target in diagram_rels:
+                        etree.SubElement(root, '{%s}Relationship' % RELS_NS, attrib={
+                            'Id': rid, 'Type': rtype, 'Target': target,
+                        })
+                    raw = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+                elif item == 'word/document.xml':
+                    # Replace placeholder rIds with real ones
+                    raw_str = raw.decode('utf-8')
+                    for placeholder, real_rid in rid_map.items():
+                        raw_str = raw_str.replace(placeholder, real_rid)
+                    raw = raw_str.encode('utf-8')
+
+                zout.writestr(item, raw)
+
+            # Write diagram XML parts
+            for dgm in diagrams:
+                idx = dgm['idx']
+                zout.writestr('word/diagrams/data{}.xml'.format(idx), dgm['data_xml'])
+                zout.writestr('word/diagrams/layout{}.xml'.format(idx), dgm['layout_xml'])
+                zout.writestr('word/diagrams/quickStyle{}.xml'.format(idx), dgm['style_xml'])
+                zout.writestr('word/diagrams/colors{}.xml'.format(idx), dgm['colors_xml'])
+                zout.writestr('word/diagrams/drawing{}.xml'.format(idx), dgm['drawing_xml'])
+
+    os.remove(tmp_path)
 
 
 def _add_smartart(doc: Document, template_name: str, items: list[str],
@@ -729,43 +834,27 @@ class SmartArt:
                       width_emu=width_emu, height_emu=height_emu)
 
     @staticmethod
-    def finalize(path: str):
+    def save(doc: Document, path: str):
         """
-        Post-process a saved .docx file to regenerate SmartArt rendering.
+        Save a document with SmartArt diagrams.
 
-        Call this after doc.save() to ensure all SmartArt diagrams render
-        correctly on first open. Requires Microsoft Word to be installed.
-
-        Without this step, SmartArt diagrams are embedded as data but may
-        appear collapsed until the user clicks on them in Word.
+        IMPORTANT: You must use SmartArt.save() instead of doc.save() when the
+        document contains SmartArt diagrams. This performs ZIP-level post-processing
+        to inject diagram parts that python-docx cannot package correctly.
 
         Args:
-            path: Path to the saved .docx file
+            doc: python-docx Document object with SmartArt diagrams added
+            path: Output file path for the .docx file
 
         Example:
-            doc.save("output.docx")
-            SmartArt.finalize("output.docx")
+            doc = Document()
+            SmartArt.add_basic_list(doc, "Languages", ["Python", "Rust", "Go"])
+            SmartArt.save(doc, "output.docx")
         """
-        try:
-            import win32com.client
-        except ImportError:
-            import warnings
-            warnings.warn(
-                "pywin32 not installed. SmartArt diagrams may appear collapsed "
-                "until clicked in Word. Install pywin32 and call SmartArt.finalize() "
-                "to pre-render diagrams: pip install pywin32"
-            )
-            return
+        # First, save with python-docx (creates the base document)
+        doc.save(path)
 
-        import time
-        abs_path = os.path.abspath(path)
-        word = win32com.client.DispatchEx('Word.Application')
-        time.sleep(2)
-        word.Visible = False
-        try:
-            doc = word.Documents.Open(abs_path)
-            # Opening and saving forces Word to regenerate all SmartArt drawings
-            doc.Save()
-            doc.Close(False)
-        finally:
-            word.Quit()
+        # Then post-process to inject diagram parts at the ZIP level
+        pending = _get_pending_diagrams(doc)
+        if pending:
+            _postprocess_docx(path, pending)

@@ -37,7 +37,7 @@ SmartArt.add_hierarchy(doc, "Team", {
     }
 })
 
-doc.save("output.docx")
+SmartArt.save(doc, "output.docx")
 ```
 
 ## Installing This Skill into GitHub Copilot

@@ -55,7 +55,7 @@ SmartArt.add_hierarchy(doc, "Team Structure", {
     }
 })
 
-doc.save("project_overview.docx")
+SmartArt.save(doc, "project_overview.docx")
 ```
 
 ## Available Diagram Types
@@ -219,7 +219,7 @@ SmartArt.add_radial(doc, "Core Services", "Event Bus", [
     "Auth", "Users", "Payments", "Notifications",
 ])
 
-doc.save("architecture.docx")
+SmartArt.save(doc, "architecture.docx")
 ```
 
 ## How It Works (Technical Details)
@@ -317,6 +317,52 @@ The diagram is embedded via an inline drawing in a paragraph:
   </wp:inline>
 </w:drawing>
 ```
+
+## Combining with Markdown-to-Word
+
+When generating complete documents from Markdown content that also need diagrams, use this pattern:
+
+1. Create the document with python-docx (adding text, headings, etc.)
+2. At each point where a diagram is needed, call the appropriate SmartArt method
+3. Use `SmartArt.save()` instead of `doc.save()` at the end
+
+```python
+from docx import Document
+from smartart import SmartArt
+
+doc = Document()
+doc.add_heading("Architecture Overview", 0)
+
+doc.add_paragraph(
+    "This document explains our system architecture."
+)
+
+# Insert a diagram between text sections
+SmartArt.add_hierarchy(doc, "System Components", {
+    "Platform": {
+        "Frontend": {"React App": {}, "Mobile App": {}},
+        "Backend": {"REST API": {}, "Worker Service": {}},
+        "Data": {"PostgreSQL": {}, "Redis Cache": {}},
+    }
+})
+
+doc.add_paragraph(
+    "The deployment follows a standard CI/CD pipeline."
+)
+
+SmartArt.add_basic_process(doc, "Deployment Pipeline", [
+    "Commit", "Build", "Test", "Stage", "Deploy",
+])
+
+# IMPORTANT: Always use SmartArt.save() when the doc contains diagrams
+SmartArt.save(doc, "architecture.docx")
+```
+
+**Key rules for combining text and diagrams:**
+- Use `SmartArt.save(doc, path)` instead of `doc.save(path)` — this performs ZIP-level post-processing required for SmartArt rendering
+- Diagrams can be placed anywhere in the document flow (between paragraphs, after headings, etc.)
+- Multiple diagrams of different types can coexist in one document
+- If the document has NO SmartArt, `SmartArt.save()` still works (it just calls `doc.save()` internally)
 
 ## Regenerating Templates
 
