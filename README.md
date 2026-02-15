@@ -50,7 +50,7 @@ Copy this skill into your repository's `.github/skills/` directory:
 
 ```bash
 # From your project root
-git submodule add https://github.com/YOUR_USERNAME/mermaid-to-word .github/skills/word-smartart
+git submodule add https://github.com/tonybaloney/word-smartart-skill .github/skills/word-smartart
 ```
 
 Or copy the files manually:
